@@ -3,8 +3,8 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
 require("dotenv").config();
+const { getPool } = require("./db"); // 👈 Import from our new db.js file
 
 const app = express();
 const cors = require("cors");
@@ -14,11 +14,7 @@ app.use(bodyParser.json());
 // -----------------------------
 // Config
 // -----------------------------
-const pool = new Pool({
-  connectionString: process.env.SUPABASE_DB_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
+const pool = getPool(); // 👈 Get the shared pool instance
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey";
 const SALT_ROUNDS = 10;
 
@@ -70,8 +66,8 @@ app.post("/register", async (req, res) => {
       `INSERT INTO users 
          (fullname, password_hash, whatsapp_number, gender, country, secret_question, secret_answer, wallet_balance)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, fullname, whatsapp_number, gender, country, created_at, wallet_balance`, // Set default wallet_balance to 0
-      [fullname, hashed, whatsapp_number, gender, country, secret_question, secret_answer, 0]
+       RETURNING id, fullname, whatsapp_number, gender, country, created_at, wallet_balance`, // Set default wallet_balance to 1000000
+      [fullname, hashed, whatsapp_number, gender, country, secret_question, secret_answer, 1000000]
     );
 
     // Respond with the created user
@@ -101,7 +97,7 @@ app.post("/check-whatsapp", async (req, res) => {
 
 // ✅ Health check route
 app.get("/", (_req, res) => {
-  res.send("Auth server is running!");
+  res.send("Auth server is running! Healthy and ready.");
 });
 
 // -----------------------------
@@ -760,5 +756,13 @@ app.post("/wallet/deduct-for-view", authMiddleware, async (req, res) => {
 // -----------------------------
 // SERVER
 // -----------------------------
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Auth server running on port ${PORT}`));
+
+// This block will only run when you are NOT on Vercel
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`🚀 Server is running locally on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
