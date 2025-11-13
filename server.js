@@ -114,42 +114,42 @@ app.get("/", (_req, res) => {
 });
 
 // -----------------------------
-// LOGIN
+// ✅ LOGIN (fixed)
 // -----------------------------
 app.post("/login", async (req, res) => {
-  console.log("Login request body:", req.body); // 👈 Debug log
+  console.log("Login request body:", req.body);
   const { whatsapp_number, password } = req.body;
 
   if (!whatsapp_number || !password) {
-    console.log("Missing one of:", { whatsapp_number, password }); // 👈 Debug log
     return res.status(400).json({ error: "Missing fields" });
   }
 
   try {
     const result = await pool.query("SELECT * FROM users WHERE whatsapp_number=$1", [whatsapp_number]);
-    console.log("DB result:", result.rows); // 👈 Debug log
     const user = result.rows[0];
     if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) return res.status(401).json({ error: "Invalid credentials" });
 
+    // ✅ Remove manual exp, let JWT handle expiry with expiresIn
     const token = jwt.sign(
       {
-        aud: 'authenticated', // Standard Supabase claim for RLS
-        exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7), // Expiration time (7 days)
-        sub: user.id, // The user's ID, which Supabase policies use
-        role: user.role || 'authenticated', // Use user's role or default
+        aud: "authenticated",
+        sub: user.id,
+        role: user.role || "authenticated",
       },
       JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: "7d" } // Expire in 7 days
     );
+
     res.json({ token });
   } catch (err) {
     console.error("Login error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
+
 
 // -----------------------------
 // Middleware → Auth
