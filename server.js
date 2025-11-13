@@ -64,14 +64,27 @@ app.post("/register", async (req, res) => {
     // Insert the new user with default wallet balance
     const result = await pool.query(
       `INSERT INTO users 
-         (fullname, password_hash, whatsapp_number, gender, country, secret_question, secret_answer, wallet_balance)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (fullname, password_hash, whatsapp_number, gender, country, secret_question, secret_answer, wallet_balance, pin)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, fullname, whatsapp_number, gender, country, created_at, wallet_balance`, // Set default wallet_balance to 1000000
-      [fullname, hashed, whatsapp_number, gender, country, secret_question, secret_answer, 1000000]
+      [fullname, hashed, whatsapp_number, gender, country, secret_question, secret_answer, 1000000, '1616']
+    );
+
+    const newUser = result.rows[0];
+
+    // Also generate a token on registration to log the user in immediately
+    const token = jwt.sign(
+      {
+        aud: 'authenticated', // Standard Supabase claim
+        exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7), // 7 days
+        sub: newUser.id,
+        role: 'authenticated', // Standard Supabase claim
+      },
+      JWT_SECRET
     );
 
     // Respond with the created user
-    res.json({ user: result.rows[0] });
+    res.json({ user: newUser, token });
   } catch (err) {
     console.error("Register error:", err);
     return res.status(500).json({ error: "Server error" });
@@ -122,7 +135,12 @@ app.post("/login", async (req, res) => {
     if (!match) return res.status(401).json({ error: "Invalid credentials" });
 
     const token = jwt.sign(
-      { userId: user.id, fullname: user.fullname, role: user.role },
+      {
+        aud: 'authenticated', // Standard Supabase claim for RLS
+        exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 7), // Expiration time (7 days)
+        sub: user.id, // The user's ID, which Supabase policies use
+        role: user.role || 'authenticated', // Use user's role or default
+      },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -143,7 +161,7 @@ const authMiddleware = (req, res, next) => {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = { id: decoded.userId, fullname: decoded.fullname, role: decoded.role };
+    req.user = { id: decoded.sub, fullname: decoded.fullname, role: decoded.role };
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid token" });
@@ -713,17 +731,17 @@ app.put("/admin/orders/:id", authMiddleware, adminOnly, async (req, res) => {
 app.post("/wallet/deduct-for-view", authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { amount, reason } = req.body;
+    const { amount, reason, pin } = req.body;
     const userId = req.user.id;
 
-    if (!amount || typeof amount !== 'number' || amount <= 0) {
-      return res.status(400).json({ error: "Invalid amount specified." });
+    if (!amount || typeof amount !== 'number' || amount <= 0 || !pin) {
+      return res.status(400).json({ error: "Invalid amount or PIN specified." });
     }
 
     await client.query("BEGIN");
 
     // 1. Get user and lock the row for update to prevent race conditions
-    const userRes = await client.query("SELECT wallet_balance FROM users WHERE id = $1 FOR UPDATE", [userId]);
+    const userRes = await client.query("SELECT wallet_balance, pin FROM users WHERE id = $1 FOR UPDATE", [userId]);
 
     if (userRes.rows.length === 0) {
       await client.query("ROLLBACK");
@@ -732,13 +750,19 @@ app.post("/wallet/deduct-for-view", authMiddleware, async (req, res) => {
 
     const user = userRes.rows[0];
 
-    // 2. Check for sufficient balance
+    // 2. Check PIN
+    if (user.pin !== pin) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "Invalid PIN." });
+    }
+
+    // 3. Check for sufficient balance
     if (user.wallet_balance < amount) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "Insufficient wallet balance." });
     }
 
-    // 3. Deduct amount from wallet
+    // 4. Deduct amount from wallet
     const updateRes = await client.query("UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 RETURNING wallet_balance", [amount, userId]);
 
     await client.query("COMMIT");
@@ -750,6 +774,121 @@ app.post("/wallet/deduct-for-view", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Server error during wallet deduction." });
   } finally {
     client.release();
+  }
+});
+
+// -----------------------------
+// ✅ DEDUCT FROM WALLET (PIN should be verified before calling this)
+// -----------------------------
+app.post("/wallet/deduct", authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { amount, reason } = req.body;
+    const userId = req.user.id;
+
+    if (!amount || typeof amount !== 'number' || amount <= 0) {
+      return res.status(400).json({ error: "A valid amount is required." });
+    }
+
+    await client.query("BEGIN");
+
+    // 1. Get user and lock the row for update
+    const userRes = await client.query("SELECT wallet_balance FROM users WHERE id = $1 FOR UPDATE", [userId]);
+    if (userRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    // 2. Check for sufficient balance
+    if (userRes.rows[0].wallet_balance < amount) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Insufficient wallet balance." });
+    }
+
+    // 3. Deduct amount from wallet
+    const updateRes = await client.query("UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 RETURNING wallet_balance", [amount, userId]);
+
+    await client.query("COMMIT");
+    res.json({ success: true, new_balance: updateRes.rows[0].wallet_balance });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Deduct error:", err);
+    res.status(500).json({ error: "Server error during wallet deduction." });
+  } finally {
+    client.release();
+  }
+});
+
+// ✅ CHECK IF USER HAS PIN
+app.get("/has-pin", authMiddleware, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await pool.query("SELECT pin FROM users WHERE id = $1", [userId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const user = result.rows[0];
+    res.json({ hasPin: !!user.pin });
+  } catch (err) {
+    console.error("Has PIN error:", err);
+    res.status(500).json({ error: "Server error while checking PIN." });
+  }
+});
+
+// ✅ SET or UPDATE PIN
+app.put("/set-pin", authMiddleware, async (req, res) => {
+  const { pin } = req.body;
+  const userId = req.user.id;
+
+  if (!pin || !/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: "A 4-digit PIN is required." });
+  }
+
+  try {
+    const result = await pool.query(
+      "UPDATE users SET pin = $1 WHERE id = $2 RETURNING id",
+      [pin, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    res.status(200).json({ success: true, message: "PIN updated successfully." });
+  } catch (err) {
+    console.error("Set PIN error:", err);
+    res.status(500).json({ error: "Server error while setting PIN." });
+  }
+});
+
+// ✅ VERIFY PIN
+app.post("/verify-pin", authMiddleware, async (req, res) => {
+  const { pin } = req.body;
+  const userId = req.user.id;
+
+  if (!pin) {
+    return res.status(400).json({ error: "PIN is required." });
+  }
+
+  try {
+    const result = await pool.query("SELECT pin FROM users WHERE id = $1", [userId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const user = result.rows[0];
+    if (user.pin !== pin) {
+      return res.status(401).json({ error: "Incorrect PIN." });
+    }
+
+    res.json({ success: true, message: "PIN verified successfully." });
+  } catch (err) {
+    console.error("Verify PIN error:", err);
+    res.status(500).json({ error: "Server error while verifying PIN." });
   }
 });
 
