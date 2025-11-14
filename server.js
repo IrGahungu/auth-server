@@ -831,7 +831,7 @@ app.get("/has-pin", authMiddleware, async (req, res) => {
     }
 
     const user = result.rows[0];
-    res.json({ hasPin: !!user.pin });
+    res.json({ hasPin: !!user.pin_code });
   } catch (err) {
     console.error("Has PIN error:", err);
     res.status(500).json({ error: "Server error while checking PIN." });
@@ -849,7 +849,7 @@ app.put("/set-pin", authMiddleware, async (req, res) => {
 
   try {
     const result = await pool.query(
-      "UPDATE users SET pin = $1 WHERE id = $2 RETURNING id",
+      "UPDATE users SET pin_code = $1 WHERE id = $2 RETURNING id",
       [pin, userId]
     );
 
@@ -874,14 +874,14 @@ app.post("/verify-pin", authMiddleware, async (req, res) => {
   }
 
   try {
-    const result = await pool.query("SELECT pin FROM users WHERE id = $1", [userId]);
+    const result = await pool.query("SELECT pin_code FROM users WHERE id = $1", [userId]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "User not found." });
     }
 
     const user = result.rows[0];
-    if (user.pin !== pin) {
+    if (user.pin_code !== pin) {
       return res.status(401).json({ error: "Incorrect PIN." });
     }
 
