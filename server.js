@@ -64,7 +64,7 @@ app.post("/register", async (req, res) => {
     // Insert the new user with default wallet balance
     const result = await pool.query(
       `INSERT INTO users 
-         (fullname, password_hash, whatsapp_number, gender, country, secret_question, secret_answer, wallet_balance, pin)
+         (fullname, password_hash, whatsapp_number, gender, country, secret_question, secret_answer, wallet_balance, pin_code)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, fullname, whatsapp_number, gender, country, created_at, wallet_balance`, // Set default wallet_balance to 1000000
       [fullname, hashed, whatsapp_number, gender, country, secret_question, secret_answer, 1000000, '1616']
